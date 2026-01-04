@@ -3,33 +3,22 @@
 // license that can be found in the LICENSE file.
 // @Author Alan <lzh.shap@gmail.com>
 // @Date   2023/07/25
-// Updated by Argo Zhang <argo@live.ca> at 2025/11/21
 
 using IP2Region.Net.Abstractions;
 using IP2Region.Net.Internal;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
-using System.Text;
-using System.Runtime.InteropServices;
 
 namespace IP2Region.Net.XDB;
 
 /// <summary>
 /// <see cref="ISearcher"/> 实现类
 /// </summary>
-/// <remarks>
-/// <inheritdoc/>
-/// </remarks>
 public class Searcher(CachePolicy cachePolicy, string xdbPath) : ISearcher
 {
     private readonly ICacheStrategy _cacheStrategy = CacheStrategyFactory.CreateCacheStrategy(cachePolicy, xdbPath);
-    private const int VectorIndexSize = 8;
-    private const int VectorIndexCols = 256;
 
-    /// <summary>
-    /// <inheritdoc/>
-    /// </summary>
     public int IoCount => _cacheStrategy.IoCount;
 
     /// <summary>
@@ -50,10 +39,10 @@ public class Searcher(CachePolicy cachePolicy, string xdbPath) : ISearcher
         Span<byte> ipBytes = stackalloc byte[16];
         if (ipAddress.TryWriteBytes(ipBytes, out var bytesWritten))
         {
-            return SearchCore(ipBytes.Slice(0, bytesWritten));
+            return _cacheStrategy.Search(ipBytes.Slice(0, bytesWritten));
         }
 #endif
-        return SearchCore(ipAddress.GetAddressBytes());
+        return _cacheStrategy.Search(ipAddress.GetAddressBytes());
     }
 
     /// <summary>
@@ -65,83 +54,8 @@ public class Searcher(CachePolicy cachePolicy, string xdbPath) : ISearcher
     {
         Span<byte> bytes = stackalloc byte[4];
         BinaryPrimitives.WriteUInt32BigEndian(bytes, ipAddress);
-        return SearchCore(bytes);
+        return _cacheStrategy.Search(bytes);
     }
-
-    string? SearchCore(ReadOnlySpan<byte> ipBytes)
-    {
-        // 重置 IO 计数器
-        _cacheStrategy.ResetIoCount();
-
-        // 计算得到 vector 索引项的开始地址。
-        var idx = (ipBytes[0] * VectorIndexCols + ipBytes[1]) * VectorIndexSize;
-
-        var vector = _cacheStrategy.GetVectorIndex(idx);
-        var sPtr = BinaryPrimitives.ReadUInt32LittleEndian(vector.Span);
-        var ePtr = BinaryPrimitives.ReadUInt32LittleEndian(vector.Span.Slice(4));
-
-        var length = ipBytes.Length;
-        var indexSize = length * 2 + 6;
-        var l = 0;
-        var h = (ePtr - sPtr) / indexSize;
-        var dataLen = 0;
-        long dataPtr = 0;
-
-        while (l <= h)
-        {
-            int m = (int)(l + h) >> 1;
-
-            var p = sPtr + m * indexSize;
-            var buff = _cacheStrategy.GetData(p, indexSize);
-
-            var s = buff.Span.Slice(0, length);
-            var e = buff.Span.Slice(length, length);
-            if (ByteCompare(ipBytes, s) < 0)
-            {
-                h = m - 1;
-            }
-            else if (ByteCompare(ipBytes, e) > 0)
-            {
-                l = m + 1;
-            }
-            else
-            {
-                dataLen = BinaryPrimitives.ReadUInt16LittleEndian(buff.Span.Slice(length * 2, 2));
-                dataPtr = BinaryPrimitives.ReadUInt32LittleEndian(buff.Span.Slice(length * 2 + 2, 4));
-                break;
-            }
-        }
-
-        var regionBuff = _cacheStrategy.GetData(dataPtr, dataLen);
-        if (MemoryMarshal.TryGetArray(regionBuff, out var segment) && segment.Array is not null)
-        {
-            return Encoding.UTF8.GetString(segment.Array, segment.Offset, segment.Count);
-        }
-
-        return Encoding.UTF8.GetString(regionBuff.Span.ToArray());
-    }
-
-    static int ByteCompare(ReadOnlySpan<byte> ip1, ReadOnlySpan<byte> ip2) => ip1.Length == 4 ? IPv4Compare(ip1, ip2) : IPv6Compare(ip1, ip2);
-
-    static int IPv4Compare(ReadOnlySpan<byte> ip1, ReadOnlySpan<byte> ip2)
-    {
-        for (int i = 0; i < ip1.Length; i++)
-        {
-            var ip2Index = ip1.Length - 1 - i;
-            if (ip1[i] < ip2[ip2Index])
-            {
-                return -1;
-            }
-            else if (ip1[i] > ip2[ip2Index])
-            {
-                return 1;
-            }
-        }
-
-        return 0;
-    }
-
-    static int IPv6Compare(ReadOnlySpan<byte> ip1, ReadOnlySpan<byte> ip2) => ip1.SequenceCompareTo(ip2);
 
     /// <summary>
     /// <inheritdoc/>

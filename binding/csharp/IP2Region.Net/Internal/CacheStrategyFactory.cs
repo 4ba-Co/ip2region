@@ -9,7 +9,7 @@ using IP2Region.Net.XDB;
 
 namespace IP2Region.Net.Internal;
 
-static class CacheStrategyFactory
+internal static class CacheStrategyFactory
 {
     public static ICacheStrategy CreateCacheStrategy(CachePolicy cachePolicy, string xdbPath) => cachePolicy switch
     {
